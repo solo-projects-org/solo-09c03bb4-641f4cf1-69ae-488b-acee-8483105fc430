@@ -27,6 +27,54 @@ function escapeHtml(value) {
   }[ch]));
 }
 
+/* ---------- 并发控制：公告切换与导出的代际令牌 ----------
+ * 连续载入多份公告时以最后一次选择为准：
+ *  - 每次发起载入都令 loadSeq +1 并中止上一份载入请求，过期响应直接丢弃；
+ *  - 发起切换时尚未完成的导出全部作废，响应回来也不下载、不改提示；
+ *  - 最新一份公告载入完成前暂停导出。
+ */
+let loadSeq = 0;
+let loadAbort = null;
+let exportSeq = 0;
+let exportAbort = null;
+let loading = false;
+let exporting = false;
+
+function invalidateExports() {
+  exportSeq += 1;
+  if (exportAbort) {
+    exportAbort.abort();
+    exportAbort = null;
+  }
+}
+
+function setLoading(value) {
+  loading = value;
+  refreshExportButton();
+}
+
+function setExporting(value) {
+  exporting = value;
+  refreshExportButton();
+}
+
+function refreshExportButton() {
+  const btn = $("#export-btn");
+  if (loading) {
+    btn.disabled = true;
+    btn.textContent = "公告载入中…";
+    btn.title = "最新公告载入完成前暂停导出";
+  } else if (exporting) {
+    btn.disabled = true;
+    btn.textContent = "导出中…";
+    btn.title = "";
+  } else {
+    btn.disabled = false;
+    btn.textContent = "导出 CSV";
+    btn.title = "";
+  }
+}
+
 /* ---------- 时间解析（与后端 timeparse.py 规则一致） ---------- */
 
 function parseDateTime(text) {
@@ -68,11 +116,7 @@ function effectiveValue(row, field) {
 
 /* ---------- 数据载入 ---------- */
 
-async function loadFromUrl(url) {
-  $("#source-error").hidden = true;
-  const resp = await fetch(url);
-  const data = await resp.json();
-  if (!resp.ok) throw new Error(data.error || "载入失败");
+function applyNotice(data) {
   state.fileName = data.fileName;
   state.tables = data.tables;
   state.tableIndex = 0;
@@ -81,6 +125,41 @@ async function loadFromUrl(url) {
   $("#editor-card").hidden = false;
   initTableSelect();
   selectTable(0);
+}
+
+/**
+ * 发起一次公告载入（上传 HTML 或载入样例共用）。
+ * 以最后一次调用为准：旧请求被中止、其响应即使晚到也会被丢弃；
+ * 最新一次载入失败时只显示原因，不动当前采录稿与改动。
+ */
+async function requestNotice(url, options = {}) {
+  const seq = ++loadSeq;
+  if (loadAbort) loadAbort.abort();
+  const controller = new AbortController();
+  loadAbort = controller;
+
+  // 切换公告：作废所有尚未完成的导出
+  invalidateExports();
+  setLoading(true);
+  $("#source-error").hidden = true;
+
+  try {
+    const resp = await fetch(url, { ...options, signal: controller.signal });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `载入失败（HTTP ${resp.status}）`);
+    if (seq !== loadSeq) return; // 已有更新的选择，本次结果作废
+    applyNotice(data);
+  } catch (err) {
+    if (seq !== loadSeq || err.name === "AbortError") return;
+    // 最后选择的公告载入失败：显示原因，保留原采录稿和改动
+    $("#source-error").textContent = err.message;
+    $("#source-error").hidden = false;
+  } finally {
+    if (seq === loadSeq) {
+      loadAbort = null;
+      setLoading(false); // 载入结束，恢复按原规则导出
+    }
+  }
 }
 
 function currentTable() {
@@ -345,6 +424,7 @@ $("#editor-table").addEventListener("click", (ev) => {
 /* ---------- 导出 ---------- */
 
 $("#export-btn").addEventListener("click", async () => {
+  if (loading || exporting) return;
   if (collectErrors().length) {
     renderValidationSummary();
     return;
@@ -358,69 +438,70 @@ $("#export-btn").addEventListener("click", async () => {
     })),
   };
 
-  const resp = await fetch("/api/export", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
+  // 每次导出各持一个代际序号；若期间发起公告切换，本次导出即作废
+  const seq = ++exportSeq;
+  const controller = new AbortController();
+  exportAbort = controller;
+  setExporting(true);
 
-  if (resp.ok) {
-    const blob = await resp.blob();
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "traffic_control.csv";
-    a.click();
-    URL.revokeObjectURL(url);
-    return;
-  }
+  try {
+    const resp = await fetch("/api/export", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+    if (seq !== exportSeq) return; // 已被新的公告切换作废，不落地任何结果
 
-  const data = await resp.json().catch(() => ({}));
-  if (resp.status === 422 && data.errors) {
-    renderEditor();
-    $("#validate-status").textContent =
-      `后端校验拦截：${data.errors.length} 行有错误（${data.errors
-        .map((e) => `第${e.row + 1}行`).join("、")}），已阻止导出。`;
+    if (resp.ok) {
+      const blob = await resp.blob();
+      if (seq !== exportSeq) return;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "traffic_control.csv";
+      a.click();
+      URL.revokeObjectURL(url);
+      return;
+    }
+
+    const data = await resp.json().catch(() => ({}));
+    if (seq !== exportSeq) return;
+    if (resp.status === 422 && data.errors) {
+      renderEditor();
+      $("#validate-status").textContent =
+        `后端校验拦截：${data.errors.length} 行有错误（${data.errors
+          .map((e) => `第${e.row + 1}行`).join("、")}），已阻止导出。`;
+      $("#validate-status").className = "error-text";
+    } else {
+      $("#validate-status").textContent = `导出失败：${data.error || resp.status}`;
+      $("#validate-status").className = "error-text";
+    }
+  } catch (err) {
+    if (seq !== exportSeq || err.name === "AbortError") return; // 作废的导出，静默
+    $("#validate-status").textContent = `导出失败：${err.message || "网络错误"}`;
     $("#validate-status").className = "error-text";
-  } else {
-    $("#validate-status").textContent = `导出失败：${data.error || resp.status}`;
-    $("#validate-status").className = "error-text";
+  } finally {
+    if (seq === exportSeq) {
+      exportAbort = null;
+      setExporting(false);
+    }
   }
 });
 
 /* ---------- 来源与映射事件 ---------- */
 
-$("#file-input").addEventListener("change", async (ev) => {
+$("#file-input").addEventListener("change", (ev) => {
   const file = ev.target.files[0];
+  ev.target.value = "";
   if (!file) return;
   const form = new FormData();
   form.append("file", file);
-  try {
-    const resp = await fetch("/api/upload", { method: "POST", body: form });
-    const data = await resp.json();
-    if (!resp.ok) throw new Error(data.error || "上传失败");
-    state.fileName = data.fileName;
-    state.tables = data.tables;
-    state.tableIndex = 0;
-    $("#source-error").hidden = true;
-    $("#source-name").textContent = `已载入：${data.fileName}（${data.tables.length} 张表）`;
-    $("#mapping-card").hidden = false;
-    $("#editor-card").hidden = false;
-    initTableSelect();
-    selectTable(0);
-  } catch (err) {
-    $("#source-error").textContent = err.message;
-    $("#source-error").hidden = false;
-  } finally {
-    ev.target.value = "";
-  }
+  requestNotice("/api/upload", { method: "POST", body: form });
 });
 
 $("#sample-btn").addEventListener("click", () => {
-  loadFromUrl("/api/sample").catch((err) => {
-    $("#source-error").textContent = err.message;
-    $("#source-error").hidden = false;
-  });
+  requestNotice("/api/sample");
 });
 
 $("#table-select").addEventListener("change", (ev) => selectTable(Number(ev.target.value)));

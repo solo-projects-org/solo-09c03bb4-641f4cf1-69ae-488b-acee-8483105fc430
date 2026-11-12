@@ -45,6 +45,10 @@ main { max-width: 1180px; margin: 24px auto; padding: 0 20px; }
 .btn:hover, .file-btn:hover { background: #eef3fa; }
 .btn-primary { background: #1f4e79; color: #fff; }
 .btn-primary:hover { background: #163a5c; }
+.btn:disabled, .file-btn-disabled {
+  opacity: .55; cursor: not-allowed; background: #eef1f5; color: #6b7785;
+  border-color: #b8c2cf;
+}
 .btn-mini { padding: 3px 10px; font-size: 12px; border-radius: 5px; }
 
 select, input[type="text"], input:not([type]) {

@@ -6,6 +6,11 @@ HTML，选择表格与四列映射，处理跨行合并的开始/结束时间，
 ## 功能
 
 - 上传公告 `.html/.htm`（UTF-8/GBK 自动识别），或一键载入内置的带合并格公告样例。
+  随附更正公告样例 `sample/sample_notice_correction.html`，可通过上传体验“换用新公告”。
+- 连续载入多份公告（上传 HTML 与载入样例混用）时**以最后一次选择为准**：
+  先发起的载入请求会被中止，迟到响应即使返回也不会覆盖页面；
+  最新一份公告载入完成前暂停导出，载入失败时显示原因并保留当前采录稿与改动。
+- 发起公告切换时尚未完成的导出立即作废，其响应回来不会触发下载或改写页面提示。
 - 一张公告含多张表时可下拉选择；可手动指定**路段、方向、开始、结束**四列，
   表头关键词可自动识别，原表预览高亮被选列与合并覆盖格。
 - 开始、结束两列的跨行合并格会被展开：覆盖格与原格共用同一时间。
@@ -41,6 +46,7 @@ app/
 ├── parser.py               # HTML 表格解析，展开 rowspan/colspan 合并格
 ├── timeparse.py            # 宽松日期时间解析
 ├── sample/sample_notice.html
+│   └── sample_notice_correction.html  # 更正公告样例（上传用）
 ├── templates/index.html
 ├── static/app.js, style.css
 ├── requirements.txt
